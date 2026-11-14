@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
 <title>Let PogoBot Sleep</title>
 <meta name="description" content="A typing game: squash the bugs before they wake PogoBot up.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -15,10 +15,12 @@
   --font: Fredoka, "Baloo 2", "Trebuchet MS", "Segoe UI", system-ui, sans-serif;
 }
 *{box-sizing:border-box}
-html,body{margin:0;height:100%;background:var(--night);color:var(--paper);font-family:var(--font)}
-body{overflow:hidden;-webkit-font-smoothing:antialiased}
-canvas#game{position:fixed;inset:0;width:100%;height:100%;display:block;touch-action:manipulation}
-#kb{position:fixed;left:0;bottom:0;width:1px;height:1px;opacity:0;border:0;padding:0;margin:0;font-size:16px;background:transparent;color:transparent;caret-color:transparent}
+html,body{margin:0;height:100%;background:var(--night);color:var(--paper);font-family:var(--font);overflow:hidden;overscroll-behavior:none}
+body{position:fixed;inset:0;-webkit-font-smoothing:antialiased}
+canvas#game{position:fixed;left:0;top:0;width:100%;height:100%;display:block;touch-action:manipulation;transform-origin:0 0}
+/* The hidden typing box sits at the top, so phones never scroll the page to show it above the keyboard */
+#kb{position:fixed;left:0;top:0;width:1px;height:1px;opacity:0;border:0;padding:0;margin:0;font-size:16px;background:transparent;color:transparent;caret-color:transparent;pointer-events:none}
+.touch .desk-only{display:none}
 .screen{position:fixed;inset:0;overflow-y:auto;overflow-x:hidden}
 [hidden]{display:none !important}
 button{font-family:var(--font)}
@@ -105,6 +107,11 @@ h1{font-size:clamp(2.6rem,5.8vw,4.6rem);line-height:.98;margin:0;font-weight:700
   .right{padding-top:0}
   .how{order:5}
 }
+@media (max-width:600px){
+  #corner{top:10px;right:10px;gap:6px}
+  .icon{width:40px;height:40px;border-radius:12px}
+  .icon svg{width:20px;height:20px}
+}
 @media (prefers-reduced-motion:reduce){ .btn,.icon{transition:none} }
 </style>
 </head>
@@ -130,7 +137,7 @@ h1{font-size:clamp(2.6rem,5.8vw,4.6rem);line-height:.98;margin:0;font-weight:700
       <div id="pogoSpot" aria-hidden="true"></div>
       <ul class="how">
         <li>Start typing a bug's word and you lock onto it. Finish the word to squash it.</li>
-        <li>Locked onto the wrong one? Press <kbd>Esc</kbd> to let go.</li>
+        <li>Locked onto the wrong one? Press <kbd>Esc</kbd> to let go, or <kbd>Backspace</kbd> on a phone.</li>
         <li>When the spray can floats past, type <kbd>pogo</kbd> to grab it.</li>
         <li>PogoBot has 3 snoozes. Each bug that reaches him uses one, and the third one wakes him up.</li>
       </ul>
@@ -189,7 +196,7 @@ h1{font-size:clamp(2.6rem,5.8vw,4.6rem);line-height:.98;margin:0;font-weight:700
         <button class="btn" id="againBtn" type="button">Play again</button>
         <button class="link" id="menuBtn" type="button">See the leaderboard</button>
       </div>
-      <p class="hint">Press Enter to play again.</p>
+      <p class="hint desk-only">Press Enter to play again.</p>
     </section>
   </div>
 </div>
@@ -199,9 +206,9 @@ h1{font-size:clamp(2.6rem,5.8vw,4.6rem);line-height:.98;margin:0;font-weight:700
   <div class="centerWrap">
     <section class="card">
       <h2>Paused</h2>
-      <p>PogoBot is still asleep. The bugs are waiting.</p>
+      <p id="pausedMsg">PogoBot is still asleep. The bugs are waiting.</p>
       <button class="btn" id="resumeBtn" type="button">Keep playing</button>
-      <p class="hint">Or press Enter.</p>
+      <p class="hint desk-only">Or press Enter.</p>
     </section>
   </div>
 </div>
@@ -235,6 +242,8 @@ const DEBUG = /[?&]debug\b/.test(QS);
 const TIME_SCALE = DEBUG ? (parseFloat((QS.match(/[?&]ts=([\d.]+)/) || [])[1]) || 1) : 1;
 const REDUCED = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
 const $ = id => document.getElementById(id);
+const TOUCH = (window.matchMedia && matchMedia('(pointer: coarse)').matches) || ('ontouchstart' in window);
+if (TOUCH) document.documentElement.classList.add('touch');
 
 const C = {
   ink: '#2B2146', paper: '#FFF6E0', cloud: '#F3EEFF', coral: '#FF5C8A', amber: '#FFC46B',
@@ -380,18 +389,51 @@ const Sfx = {
 
 /* ---------------- canvas ---------------- */
 const cv = $('game'), ctx = cv.getContext('2d');
-let W = 0, H = 0, S = 1, DPR = 1, CX = 0, CY = 0;
+let W = 0, H = 0, S = 1, TS = 1, DPR = 1, CX = 0, CY = 0, HUD_H = 72, COMPACT = false;
 let STARS = [];
+// On phones the keyboard covers part of the screen. During a run the game uses only the part you
+// can see (the visual viewport), so bugs never come from behind the keyboard or off the top.
+function viewBox() {
+  const vv = window.visualViewport;
+  if (vv && playing()) return { w: vv.width, h: vv.height, x: vv.offsetLeft, y: vv.offsetTop };
+  return { w: window.innerWidth, h: window.innerHeight, x: 0, y: 0 };
+}
 function resize() {
+  const ow = W, oh = H, oR = W ? arenaR() : 0;
+  const vb = viewBox();
   DPR = Math.min(2, window.devicePixelRatio || 1);
-  W = window.innerWidth; H = window.innerHeight;
+  W = Math.max(1, Math.round(vb.w)); H = Math.max(1, Math.round(vb.h));
   cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR);
+  cv.style.width = W + 'px'; cv.style.height = H + 'px';
+  const tf = (vb.x || vb.y) ? `translate(${vb.x}px,${vb.y}px)` : '';
+  cv.style.transform = tf; $('corner').style.transform = tf;
   S = clamp(Math.min(W, H) / 820, 0.62, 1.35);
-  CX = W / 2; CY = H / 2 + 10 * S;
+  TS = Math.max(S, 0.82);            // text never shrinks below a readable size
+  COMPACT = W < 600;                  // phone-style layout for the score bar and cards
+  HUD_H = COMPACT ? Math.max(92, 100 * TS) : 72 * TS;
+  CX = W / 2; CY = H / 2 + (COMPACT ? 26 : 10) * S;
   G.pogoR = 60 * S;
+  G.cramped = TOUCH && H < 270;       // a phone on its side with the keyboard open
   STARS = [];
   const n = Math.round(W * H / 9000);
   for (let i = 0; i < n; i++) STARS.push({ x: Math.random() * W, y: Math.random() * H, r: rand(0.5, 1.7), p: rand(0, TAU), s: rand(0.6, 2) });
+  if (ow && oh && (ow !== W || oh !== H) && G.state !== 'menu') rescaleWorld(ow, oh, oR);
+}
+// When the keyboard opens or closes mid-run, squeeze everything into the new area.
+function rescaleWorld(ow, oh, oR) {
+  const sx = W / ow, sy = H / oh, sr = oR ? arenaR() / oR : 1;
+  const m = o => { o.x *= sx; o.y *= sy; };
+  for (const b of G.bugs) {
+    m(b); b.sp *= sr;
+    if (b.anchorX != null) { b.anchorX *= sx; b.L *= sy; }
+    if (b.j) { b.j.x0 *= sx; b.j.x1 *= sx; b.j.y0 *= sy; b.j.y1 *= sy; }
+    if (b.dvx != null) { b.dvx *= sr; b.dvy *= sr; }
+    if (b.trail) for (const t of b.trail) m(t);
+  }
+  if (G.spray) { m(G.spray); G.spray.y0 *= sy; G.spray.vx *= sx; }
+  for (const q of G.parts) m(q);
+  for (const q of G.splats) m(q);
+  P.x *= sx; P.y *= sy;
 }
 function path(fn) { ctx.beginPath(); fn(); }
 function circ(x, y, r) { ctx.beginPath(); ctx.arc(x, y, Math.max(0.1, r), 0, TAU); }
@@ -845,9 +887,12 @@ function makeBug(type, opts = {}) {
   const b = { kind: 'bug', type, t: 0, phase: rand(0, TAU), typed: 0, dead: false, dying: 0, flash: 0, jolt: 0, st: '', timer: rand(0.2, 0.6), heading: 0, vx: 0, vy: 0, z: 0, quip: null, baby: !!opts.baby, direct: false };
   b.r = T.size * S * (b.baby ? 0.6 : 1);
   b.text = textFor(b.baby ? 'baby' : type, G.wave, usedLetters());
-  b.sp = (arenaR() / T.travel) * G.speedMul * (b.baby ? 1.45 : 1);
   if (opts.x != null) { b.x = opts.x; b.y = opts.y; } else { const p = edgeSpawn(); b.x = p.x; b.y = p.y; }
   if (T.init) T.init(b);
+  // Speed comes from this bug's own distance, so it takes about the same time to reach PogoBot
+  // whichever edge it starts from (on a tall phone the sides are much closer than the top).
+  const dist = opts.x != null ? arenaR() : Math.max(Math.hypot(b.x - CX, b.y - CY), arenaR() * 0.45);
+  b.sp = (dist / (T.travel * 0.75)) * G.speedMul * (b.baby ? 1.45 : 1);
   b.heading = Math.atan2(CY - b.y, CX - b.x);
   return b;
 }
@@ -898,6 +943,7 @@ function startRun() {
   if (G.player && !G.player.guest) G.runPromise = Api.call('start', { id: G.player.id }).catch(() => null);
   beginIntro(1);
   focusKb();
+  queueResize();
 }
 function beginIntro(n) {
   G.wave = n; G.state = 'intro';
@@ -950,6 +996,8 @@ function gameOver() {
   $('oBugs').textContent = fmt(G.bugsKilled);
   $('oCombo').textContent = fmt(G.maxCombo);
   showScreen('over');
+  if (TOUCH) kb.blur();
+  queueResize();
   $('againBtn').focus({ preventScroll: true });
   submitRun();
 }
@@ -1065,6 +1113,7 @@ function update(dt) {
   G.splats = G.splats.filter(s => s.life > 0);
   if (G.banner) { G.banner.t -= dt; if (G.banner.t <= 0) G.banner = null; }
   if (G.paused || G.state === 'menu' || G.state === 'over') return;
+  if (G.cramped && playing()) return;
 
   if (G.state === 'intro') { G.introT -= dt; if (G.introT <= 0) beginWave(); }
   if (G.state === 'between') { G.betweenT -= dt; if (G.betweenT <= 0) beginIntro(G.wave + 1); }
@@ -1210,19 +1259,31 @@ function labelAnchor(o) {
   if (o.type === 'spider') return { x: o.x, y: o.y + o.r * 1.75 + 14 * S, below: true };
   return { x: o.x, y: o.y - (o.z || 0) - o.r * 1.25 - 6 * S };
 }
+// Labels that would overlap get stacked, which matters on narrow phone screens.
+let LABEL_RECTS = [];
+function placeLabel(x, y, w, h) {
+  for (let tries = 0; tries < 4; tries++) {
+    const hit = LABEL_RECTS.find(r => x < r.x + r.w && x + w > r.x && y < r.y + r.h && y + h > r.y);
+    if (!hit) break;
+    y = hit.y + hit.h + 3 * TS;
+  }
+  y = Math.min(y, H - h - 6);
+  LABEL_RECTS.push({ x, y, w, h });
+  return y;
+}
 function drawLabel(o) {
   if (o.dead || (o.kind === 'bug' && o.type === 'caterpillar')) return;
   const isT = G.target === o, sentence = o.text.length > 14;
-  const fs = (sentence ? 15 : 18) * S * (isT ? 1.08 : 1);
+  const fs = (sentence ? 15 : 18) * TS * (isT ? 1.08 : 1);
   ctx.font = font(600, fs);
   const hidden = o.kind === 'bug' && o.type === 'firefly' && !o.lit;
   const typed = o.text.slice(0, o.typed);
   let rest = o.text.slice(o.typed);
   if (hidden) rest = '•'.repeat(rest.length);
   const wT = ctx.measureText(typed).width, wR = ctx.measureText(rest).width;
-  const padX = 9 * S, h = fs * 1.5, w = wT + wR + padX * 2;
+  const padX = 9 * TS, h = fs * 1.5, w = wT + wR + padX * 2;
   const a = labelAnchor(o);
-  const x = clamp(a.x - w / 2, 6, W - w - 6), y = clamp(a.y - h, 72 * S, H - h - 6);
+  const x = clamp(a.x - w / 2, 6, W - w - 6), y = placeLabel(x, clamp(a.y - h, HUD_H, H - h - 6), w, h);
   ctx.save();
   if (o.jolt > 0) ctx.translate(Math.sin(G.t * 90) * 4 * S, 0);
   rrect(x + 3 * S, y + 3 * S, w, h, h / 2); ctx.fillStyle = 'rgba(20,14,50,.55)'; ctx.fill();
@@ -1237,14 +1298,14 @@ function drawLabel(o) {
   if (isT && o.kind === 'bug') { circ(o.x, o.y - (o.z || 0), o.r * 1.45); ctx.lineWidth = 3 * S; ctx.strokeStyle = C.coral; ctx.setLineDash([6 * S, 5 * S]); ctx.stroke(); ctx.setLineDash([]); }
 }
 function drawBubble(x, y, text, opts = {}) {
-  const fs = (opts.size || 15) * S;
+  const fs = (opts.size || 15) * TS;
   ctx.font = font(opts.big ? 700 : 600, fs);
-  const lines = wrapText(text, (opts.maxW || 240) * S);
-  const lh = fs * 1.25, padX = 12 * S, padY = 9 * S;
+  const lines = wrapText(text, Math.min((opts.maxW || 240) * TS, W * 0.72));
+  const lh = fs * 1.25, padX = 12 * TS, padY = 9 * TS;
   const w = Math.max(...lines.map(l => ctx.measureText(l).width)) + padX * 2, h = lines.length * lh + padY * 2;
   let bx = x, by = y - h; let flip = false;
   if (bx + w > W - 8) { bx = x - w; flip = true; }
-  bx = clamp(bx, 8, W - w - 8); by = clamp(by, 60 * S, H - h - 8);
+  bx = clamp(bx, 8, W - w - 8); by = clamp(by, G.state === 'over' ? 8 : HUD_H * 0.8, H - h - 8);
   ctx.save();
   rrect(bx + 3 * S, by + 3 * S, w, h, 14 * S); ctx.fillStyle = 'rgba(20,14,50,.5)'; ctx.fill();
   rrect(bx, by, w, h, 14 * S); ctx.fillStyle = opts.fill || '#fff'; ctx.fill(); ctx.lineWidth = 2.5 * S; ctx.strokeStyle = C.ink; ctx.stroke();
@@ -1280,36 +1341,59 @@ function moon(x, y, r, full) {
   ctx.restore();
 }
 function drawHUD() {
-  const s = S;
+  const s = TS, compact = COMPACT;
+  // soft band so the score stays readable when bugs crawl in from the top
+  const band = ctx.createLinearGradient(0, 0, 0, HUD_H);
+  band.addColorStop(0, 'rgba(27,23,64,.8)'); band.addColorStop(0.7, 'rgba(27,23,64,.4)'); band.addColorStop(1, 'rgba(27,23,64,0)');
+  ctx.fillStyle = band; ctx.fillRect(0, 0, W, HUD_H);
   ctx.textBaseline = 'alphabetic'; ctx.textAlign = 'left';
-  ctx.fillStyle = C.paper; ctx.font = font(700, 32 * s); ctx.fillText(fmt(G.score), 20 * s, 46 * s);
+  const lx = (compact ? 16 : 20) * s;
+  ctx.fillStyle = C.paper; ctx.font = font(700, (compact ? 26 : 32) * s);
+  ctx.fillText(fmt(G.score), lx, (compact ? 36 : 46) * s);
   const sw = ctx.measureText(fmt(G.score)).width;
+  ctx.font = font(500, (compact ? 13 : 14) * s); ctx.fillStyle = 'rgba(255,246,224,.7)';
+  ctx.fillText(G.combo > 2 ? `Combo ${G.combo}` : 'Score', lx, (compact ? 54 : 66) * s);
+  // multiplier and buff pills: beside the score on wide screens, on their own row on phones
+  let px = compact ? lx : lx + sw + 12 * s;
+  const py = compact ? 62 * s : 24 * s, ph = (compact ? 22 : 26) * s;
+  const pill = (txt, bg) => {
+    ctx.font = font(700, (compact ? 13 : 15) * s); const w = ctx.measureText(txt).width + 16 * s;
+    rrect(px, py, w, ph, ph / 2); ctx.fillStyle = bg; ctx.fill();
+    ctx.fillStyle = C.ink; ctx.textBaseline = 'middle'; ctx.fillText(txt, px + 8 * s, py + ph / 2 + 1); ctx.textBaseline = 'alphabetic';
+    px += w + 6 * s;
+  };
   const m = multNow();
-  let px = 20 * s + sw + 12 * s;
-  const pill = (txt, bg, fg) => { ctx.font = font(700, 15 * s); const w = ctx.measureText(txt).width + 18 * s; rrect(px, 24 * s, w, 26 * s, 13 * s); ctx.fillStyle = bg; ctx.fill(); ctx.fillStyle = fg; ctx.fillText(txt, px + 9 * s, 42 * s); px += w + 8 * s; };
-  if (m > 1) pill(`×${m}`, C.coral, C.ink);
-  if (G.doubleT > 0) pill(`Double points ${Math.ceil(G.doubleT)}s`, C.amber, C.ink);
-  if (G.freezeT > 0) pill(`Frozen ${Math.ceil(G.freezeT)}s`, C.ice, C.ink);
-  ctx.font = font(500, 14 * s); ctx.fillStyle = 'rgba(255,246,224,.7)';
-  ctx.fillText(G.combo > 2 ? `Combo ${G.combo}` : 'Score', 20 * s, 66 * s);
+  if (m > 1) pill(`×${m}`, C.coral);
+  if (G.doubleT > 0) pill(compact ? `2× points ${Math.ceil(G.doubleT)}s` : `Double points ${Math.ceil(G.doubleT)}s`, C.amber);
+  if (G.freezeT > 0) pill(`Frozen ${Math.ceil(G.freezeT)}s`, C.ice);
   // wave
-  ctx.textAlign = 'center'; ctx.fillStyle = C.paper; ctx.font = font(700, 22 * s);
-  ctx.fillText(`Wave ${Math.max(1, G.wave)}`, W / 2, 38 * s);
-  ctx.font = font(500, 14 * s); ctx.fillStyle = 'rgba(255,246,224,.7)';
+  ctx.textAlign = 'center'; ctx.fillStyle = C.paper; ctx.font = font(700, (compact ? 19 : 22) * s);
+  ctx.fillText(`Wave ${Math.max(1, G.wave)}`, W / 2, (compact ? 32 : 38) * s);
+  ctx.font = font(500, 13 * s); ctx.fillStyle = 'rgba(255,246,224,.7)';
   const left = G.state === 'wave' ? G.toSpawn + aliveBugs().length + (G.bossPending ? 1 : 0) : 0;
   const sub = G.player && G.player.guest ? 'Practice run' : (G.state === 'wave' ? `${left} bug${left === 1 ? '' : 's'} to go` : '');
-  ctx.fillText(sub, W / 2, 58 * s);
-  // snoozes (left of the corner buttons)
-  const mx = W - 120 - 26 * s;
-  ctx.textAlign = 'right'; ctx.fillStyle = 'rgba(255,246,224,.7)'; ctx.font = font(500, 14 * s);
-  ctx.fillText('Snoozes left', mx + 10 * s, 64 * s);
-  for (let i = 0; i < 3; i++) moon(mx - i * 28 * s, 36 * s, 10 * s, i < G.snoozes);
-  // bottom stats
-  ctx.textAlign = 'left'; ctx.font = font(600, 16 * s); ctx.fillStyle = 'rgba(255,246,224,.85)';
+  ctx.fillText(sub, W / 2, (compact ? 50 : 58) * s);
+  // snoozes: under the corner buttons on phones, beside them on wide screens
+  if (compact) {
+    const r = 8 * s;
+    for (let i = 0; i < 3; i++) moon(W - 20 - r - i * (2 * r + 8), 72, r, i < G.snoozes);
+  } else {
+    const mx = W - 120 - 26 * s;
+    ctx.textAlign = 'right'; ctx.fillStyle = 'rgba(255,246,224,.7)'; ctx.font = font(500, 14 * s);
+    ctx.fillText('Snoozes left', mx + 10 * s, 64 * s);
+    for (let i = 0; i < 3; i++) moon(mx - i * 28 * s, 36 * s, 10 * s, i < G.snoozes);
+  }
+  // bottom line
+  const by = H - (compact ? 14 : 20) * s;
+  ctx.textAlign = 'left'; ctx.font = font(600, (compact ? 14 : 16) * s); ctx.fillStyle = 'rgba(255,246,224,.85)';
   const acc = Math.round(100 * G.correct / Math.max(1, G.correct + G.wrong));
-  ctx.fillText(`${wpmNow()} WPM`, 20 * s, H - 20 * s);
-  if (G.correct + G.wrong > 0) ctx.fillText(`${acc}% accurate`, 20 * s + 100 * s, H - 20 * s);
-  if (G.wave <= 2) { ctx.textAlign = 'right'; ctx.font = font(500, 14 * s); ctx.fillStyle = 'rgba(255,246,224,.55)'; ctx.fillText('Esc lets go of a bug', W - 20 * s, H - 20 * s); }
+  ctx.fillText(`${wpmNow()} WPM`, lx, by);
+  if (G.correct + G.wrong > 0) ctx.fillText(`${acc}% accurate`, lx + (compact ? 80 : 100) * s, by);
+  if (G.wave <= 2) {
+    ctx.font = font(500, (compact ? 12 : 14) * s); ctx.fillStyle = 'rgba(255,246,224,.55)';
+    if (TOUCH) { ctx.textAlign = 'center'; ctx.fillText('Backspace lets go. Tap if the keyboard hides.', W / 2, by - 22 * s); }
+    else { ctx.textAlign = 'right'; ctx.fillText('Esc lets go of a bug', W - lx, by); }
+  }
 }
 function drawIntro() {
   const tIn = G.introDur - G.introT, a = clamp(Math.min(tIn / 0.3, G.introT / 0.3), 0, 1);
@@ -1318,41 +1402,57 @@ function drawIntro() {
   ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
   ctx.font = font(700, 44 * S); ctx.lineWidth = 8 * S; ctx.strokeStyle = 'rgba(27,23,64,.9)';
   const title = boss ? `Wave ${G.wave}: boss` : `Wave ${G.wave}`;
-  const ty = Math.max(110 * S, CY - 175 * S);
+  const ty = Math.max(HUD_H + 40 * S, CY - 175 * S);
   ctx.strokeText(title, W / 2, ty); ctx.fillStyle = C.paper; ctx.fillText(title, W / 2, ty);
   const n = G.introCards.length;
   if (n) {
-    ctx.font = font(600, 15 * S); ctx.fillStyle = 'rgba(255,246,224,.85)';
-    ctx.fillText(n === 1 ? 'New bug' : 'New bugs', W / 2, ty + 28 * S);
-    const cw = Math.min(330 * S, (W - 40 - (n - 1) * 16) / n), ch = 104 * S;
-    const total = n * cw + (n - 1) * 16, x0 = W / 2 - total / 2, y0 = Math.min(H - ch - 50 * S, CY + 110 * S);
-    G.introCards.forEach((k, i) => {
-      const T = TYPES[k], x = x0 + i * (cw + 16), y = y0;
-      rrect(x + 5 * S, y + 5 * S, cw, ch, 20 * S); ctx.fillStyle = C.ink; ctx.fill();
-      rrect(x, y, cw, ch, 20 * S); fillStroke(C.paper, 3 * S);
-      const ix = x + 48 * S, iy = y + ch / 2;
-      const demo = { type: k, t: G.t, phase: 0, heading: 0, r: Math.min(T.size, 27) * S * 1.05, lit: true, st: '', face: 1, text: 'abcde', typed: 0, x: ix, y: iy, baby: false };
-      ctx.save();
-      if (k === 'caterpillar') { ctx.translate(ix + 22 * S, iy); ctx.rotate(0); for (let j = 3; j >= 0; j--) { circ(-j * 17 * S - 10 * S, Math.sin(G.t * 6 - j) * 3 * S, 11 * S); fillStroke(j % 2 ? '#6FBF45' : '#8BD45A', 2.2 * S); } circ(8 * S, 0, 14 * S); fillStroke('#9BE15D', 2.2 * S); eye(12 * S, -5 * S, 5 * S, 0, 1.2); eye(12 * S, 6 * S, 5 * S, 0, 1.2); }
-      else { ctx.translate(ix, iy + (k === 'snail' ? 8 * S : 0)); const sc = k === 'snail' ? 0.8 : 1; ctx.scale(sc, sc); if (!T.upright) ctx.rotate(-Math.PI / 2 + 0.2); T.draw(demo, demo.r, 2.2 * S, Math.PI / 2); }
-      ctx.restore();
-      ctx.textAlign = 'left'; ctx.fillStyle = C.ink; ctx.font = font(700, 19 * S);
-      ctx.fillText(T.name, x + 96 * S, y + 34 * S);
-      ctx.font = font(500, 14 * S);
-      wrapText(T.line, cw - 110 * S).slice(0, 3).forEach((l, j) => ctx.fillText(l, x + 96 * S, y + 56 * S + j * 18 * S));
-      ctx.textAlign = 'center';
-    });
+    ctx.font = font(600, 15 * TS); ctx.fillStyle = 'rgba(255,246,224,.85)';
+    ctx.fillText(n === 1 ? 'New bug' : 'New bugs', W / 2, ty + 24 * TS);
+    if (COMPACT) {
+      const u = TS, cw = Math.min(W - 32, 380), ch = 84 * u, gap = 10, total = n * ch + (n - 1) * gap;
+      const x = W / 2 - cw / 2, y0 = Math.max(ty + 40 * TS, Math.min(H - total - 14, CY + 60 * S));
+      G.introCards.forEach((k, i) => drawIntroCard(k, x, y0 + i * (ch + gap), cw, ch, u, true));
+    } else {
+      const u = S, cw = Math.min(330 * S, (W - 40 - (n - 1) * 16) / n), ch = 104 * S;
+      const total = n * cw + (n - 1) * 16, x0 = W / 2 - total / 2, y0 = Math.min(H - ch - 50 * S, CY + 110 * S);
+      G.introCards.forEach((k, i) => drawIntroCard(k, x0 + i * (cw + 16), y0, cw, ch, u, false));
+    }
   }
   ctx.restore();
+}
+function drawIntroCard(k, x, y, cw, ch, u, compact) {
+  const T = TYPES[k];
+  rrect(x + 5 * u, y + 5 * u, cw, ch, 20 * u); ctx.fillStyle = C.ink; ctx.fill();
+  rrect(x, y, cw, ch, 20 * u); fillStroke(C.paper, 3 * u);
+  const ix = x + (compact ? 38 : 48) * u, iy = y + ch / 2;
+  const r = Math.min(T.size, 27) * u * (compact ? 0.9 : 1.05);
+  const demo = { type: k, t: G.t, phase: 0, heading: 0, r, lit: true, st: '', face: 1, text: 'abcde', typed: 0, x: ix, y: iy, baby: false };
+  ctx.save(); ctx.translate(ix, iy);
+  if (k === 'caterpillar') {
+    if (compact) { ctx.scale(0.7, 0.7); ctx.translate(30 * u, 0); } else ctx.translate(22 * u, 0);
+    for (let j = 3; j >= 0; j--) { circ(-j * 17 * u - 10 * u, Math.sin(G.t * 6 - j) * 3 * u, 11 * u); fillStroke(j % 2 ? '#6FBF45' : '#8BD45A', 2.2 * u); }
+    circ(8 * u, 0, 14 * u); fillStroke('#9BE15D', 2.2 * u); eye(12 * u, -5 * u, 5 * u, 0, 1.2); eye(12 * u, 6 * u, 5 * u, 0, 1.2);
+  } else {
+    if (k === 'snail') { ctx.translate(0, 8 * u); ctx.scale(0.8, 0.8); }
+    if (!T.upright) ctx.rotate(-Math.PI / 2 + 0.2);
+    T.draw(demo, r, 2.2 * u, Math.PI / 2);
+  }
+  ctx.restore();
+  const tx = x + (compact ? 76 : 96) * u;
+  ctx.textAlign = 'left'; ctx.fillStyle = C.ink; ctx.font = font(700, (compact ? 17 : 19) * u);
+  ctx.fillText(T.name, tx, y + (compact ? 28 : 34) * u);
+  ctx.font = font(500, (compact ? 13.5 : 14) * u);
+  wrapText(T.line, x + cw - tx - 12 * u).slice(0, compact ? 2 : 3).forEach((l, j) => ctx.fillText(l, tx, y + (compact ? 48 : 56) * u + j * (compact ? 17 : 18) * u));
+  ctx.textAlign = 'center';
 }
 function drawBanner() {
   const b = G.banner; if (!b) return;
   const a = clamp(Math.min((b.max - b.t) / 0.25, b.t / 0.35), 0, 1);
   ctx.save(); ctx.globalAlpha = a; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
-  const y = Math.max(120 * S, CY - 190 * S) + (1 - a) * 10 * S;
+  const y = Math.max(HUD_H + 44 * S, CY - 190 * S) + (1 - a) * 10 * S;
   ctx.font = font(700, 40 * S); ctx.lineWidth = 8 * S; ctx.strokeStyle = 'rgba(27,23,64,.9)';
   ctx.strokeText(b.title, W / 2, y); ctx.fillStyle = b.color || C.paper; ctx.fillText(b.title, W / 2, y);
-  ctx.font = font(600, 17 * S); ctx.lineWidth = 5 * S; ctx.strokeText(b.sub, W / 2, y + 30 * S); ctx.fillStyle = C.paper; ctx.fillText(b.sub, W / 2, y + 30 * S);
+  ctx.font = font(600, 15 * TS); ctx.lineWidth = 5 * S; ctx.strokeText(b.sub, W / 2, y + 30 * S); ctx.fillStyle = C.paper; ctx.fillText(b.sub, W / 2, y + 30 * S);
   ctx.restore();
 }
 function drawDreamBubbles() {
@@ -1392,8 +1492,9 @@ function render() {
   if (G.spray) drawSpray(G.spray);
   drawParticles(false);
   if (G.state !== 'menu' && G.state !== 'over') {
+    LABEL_RECTS = [];
+    if (G.target) drawLabel(G.target);   // the word you're typing keeps its place
     for (const o of targets()) if (o !== G.target) drawLabel(o);
-    if (G.target) drawLabel(G.target);
     for (const o of targets()) if (o.quip) { const a = labelAnchor(o); drawBubble(a.x + 10 * S, a.y - 30 * S, o.quip.text, { size: 13, maxW: 170, fill: C.cloud }); }
   }
   drawParticles(true);
@@ -1406,6 +1507,11 @@ function render() {
   if (G.state !== 'menu' && G.state !== 'over') drawHUD();
   if (G.state === 'intro') drawIntro();
   drawBanner();
+  if (G.cramped && playing()) {
+    ctx.fillStyle = 'rgba(27,23,64,.88)'; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = C.paper; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.font = font(700, 18);
+    ctx.fillText('Turn your phone upright to keep playing', W / 2, H / 2);
+  }
 }
 
 /* ---------------- loop ---------------- */
@@ -1421,12 +1527,31 @@ function frame(now) {
 /* ---------------- input ---------------- */
 const kb = $('kb');
 function playing() { return ['intro', 'wave', 'between', 'waking'].includes(G.state); }
-function focusKb() { if (playing() && !G.paused) kb.focus({ preventScroll: true }); }
+function focusKb() {
+  if (!playing() || G.paused) return;
+  if (document.activeElement !== kb) { resetKb(); kb.focus({ preventScroll: true }); }
+  if (window.scrollX || window.scrollY) window.scrollTo(0, 0);
+}
+// The hidden box always starts with one marker character. New letters are whatever gets added after
+// what was there before; a shorter value means Backspace; anything else (a phone keyboard rewriting
+// a word) is ignored. This works for laptop keyboards and for phone keyboards that build up words.
+const KB_MARK = '>';
+let kbPrev = KB_MARK, composing = false, refocusing = false;
+function resetKb() { kb.value = KB_MARK; kbPrev = KB_MARK; try { kb.setSelectionRange(1, 1); } catch (e) {} }
+kb.addEventListener('compositionstart', () => { composing = true; });
+kb.addEventListener('compositionend', () => { composing = false; if (kb.value.length > 24) resetKb(); });
 kb.addEventListener('input', e => {
-  const v = kb.value; kb.value = '';
-  if (e.inputType && e.inputType.indexOf('insertFromPaste') === 0) return;
-  if (!v || v.length > 3) return;
-  for (const ch of v) handleChar(ch);
+  const v = kb.value;
+  if (e.inputType && e.inputType.indexOf('insertFromPaste') === 0) { resetKb(); return; }
+  if (v.length < kbPrev.length || !v.startsWith(KB_MARK)) {
+    if (v.length < kbPrev.length) dropTarget();
+    if (composing && v.startsWith(KB_MARK)) kbPrev = v; else resetKb();
+    return;
+  }
+  const added = v.startsWith(kbPrev) ? v.slice(kbPrev.length) : '';
+  kbPrev = v;
+  if (added.length && added.length <= 3) for (const ch of added) handleChar(ch);
+  if ((!composing && v.length > 24) || v.length > 60) resetKb();
 });
 kb.addEventListener('paste', e => e.preventDefault());
 kb.addEventListener('drop', e => e.preventDefault());
@@ -1434,8 +1559,19 @@ kb.addEventListener('keydown', e => {
   if (e.key === 'Escape' || e.key === 'Backspace') { e.preventDefault(); dropTarget(); }
   else if (e.key === 'Tab' || e.key === 'Enter') e.preventDefault();
 });
-kb.addEventListener('blur', () => { setTimeout(() => { if (playing() && !G.paused && document.hasFocus()) focusKb(); }, 0); });
-document.addEventListener('pointerdown', e => { if (playing() && !G.paused && !e.target.closest('button')) setTimeout(focusKb, 0); });
+kb.addEventListener('blur', () => {
+  if (refocusing) return;
+  if (TOUCH) { if (playing() && !G.paused) pause(); return; }   // the phone keyboard was closed
+  setTimeout(() => { if (playing() && !G.paused && document.hasFocus()) focusKb(); }, 0);
+});
+// A tap on the game brings the keyboard back. Phones only open the keyboard from a tap.
+document.addEventListener('click', e => {
+  if (!playing() || G.paused || e.target.closest('button')) return;
+  if (TOUCH) { refocusing = true; kb.blur(); refocusing = false; resetKb(); kb.focus({ preventScroll: true }); }
+  else focusKb();
+});
+// The corner buttons shouldn't steal focus from the typing box.
+for (const id of ['pauseBtn', 'muteBtn']) $(id).addEventListener('pointerdown', e => e.preventDefault());
 document.addEventListener('keydown', e => {
   if (e.key !== 'Enter') return;
   if (G.paused) { e.preventDefault(); resume(); }
@@ -1443,7 +1579,11 @@ document.addEventListener('keydown', e => {
 });
 function pause() {
   if (!playing() || G.paused || G.state === 'waking') return;
-  G.paused = true; showScreen('paused'); $('resumeBtn').focus({ preventScroll: true });
+  G.paused = true;
+  $('pausedMsg').textContent = TOUCH ? 'PogoBot is still asleep. Tap Keep playing and your keyboard will come back.' : 'PogoBot is still asleep. The bugs are waiting.';
+  showScreen('paused');
+  if (TOUCH) kb.blur();
+  $('resumeBtn').focus({ preventScroll: true });
 }
 function resume() { if (!G.paused) return; G.paused = false; showScreen(null); last = performance.now(); focusKb(); }
 window.addEventListener('blur', pause);
@@ -1463,6 +1603,7 @@ function toMenu() {
   G.state = 'menu'; G.paused = false; resetRun();
   $('pauseBtn').hidden = true;
   showScreen('menu');
+  queueResize();
   loadLeaderboard();
 }
 function playAgain() { if (G.state === 'over') startRun(); }
@@ -1602,7 +1743,10 @@ function celebrate() {
 }
 
 /* ---------------- boot ---------------- */
-window.addEventListener('resize', resize);
+let rzQueued = false;
+function queueResize() { if (rzQueued) return; rzQueued = true; requestAnimationFrame(() => { rzQueued = false; resize(); }); }
+window.addEventListener('resize', queueResize);
+if (window.visualViewport) { visualViewport.addEventListener('resize', queueResize); visualViewport.addEventListener('scroll', queueResize); }
 resize();
 syncMute();
 if (!Api.enabled) { loginForm.hidden = true; $('offlineBox').hidden = false; }
@@ -1610,7 +1754,7 @@ const lastId = store.get('pogo_last_id'); if (lastId && Api.enabled) idInput.val
 showScreen('menu');
 loadLeaderboard();
 requestAnimationFrame(t => { last = t; requestAnimationFrame(frame); });
-if (DEBUG) window.__pogo = { G, P, TYPES, handleChar, startRun, spawnBug, spawnSpray, hitPogo, normalizeId, Api };
+if (DEBUG) window.__pogo = { G, P, TYPES, handleChar, startRun, spawnBug, spawnSpray, hitPogo, normalizeId, Api, resize };
 </script>
 </body>
 </html>
