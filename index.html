@@ -185,7 +185,7 @@ h1{font-size:clamp(2.6rem,5.8vw,4.6rem);line-height:.98;margin:0;font-weight:700
       <h2 id="overTitle">PogoBot woke up</h2>
       <p class="bigScore"><b id="oScore">0</b>points</p>
       <dl class="stats">
-        <div><dt>Speed</dt><dd id="oWpm">0 WPM</dd></div>
+        <div><dt>Typing speed</dt><dd id="oWpm">– WPM</dd></div>
         <div><dt>Accuracy</dt><dd id="oAcc">0%</dd></div>
         <div><dt>Reached</dt><dd id="oWave">Wave 1</dd></div>
         <div><dt>Bugs squashed</dt><dd id="oBugs">0</dd></div>
@@ -223,7 +223,7 @@ h1{font-size:clamp(2.6rem,5.8vw,4.6rem);line-height:.98;margin:0;font-weight:700
 const API_URL = 'https://script.google.com/macros/s/AKfycbyPEvEnjtepl1xtoQGQwNsrfQ5RDiA3YC627g6cFugpr34wa0Uh5gyqPk_U-XYEvDIc/exec';
 const GAME_NAME = 'Let PogoBot Sleep';
 const KING_TITLE = 'Typing King';
-const CLIENT_VERSION = 1;
+const CLIENT_VERSION = 2;
 
 /* ---------------- small helpers ---------------- */
 const TAU = Math.PI * 2;
@@ -896,15 +896,16 @@ function makeBug(type, opts = {}) {
   b.heading = Math.atan2(CY - b.y, CX - b.x);
   return b;
 }
-function spawnBug(type, opts) {
-  const b = makeBug(type, opts);
+function addBug(b) {
   G.bugs.push(b);
-  if (!opts || !opts.baby) {
-    if (Math.random() < 0.22) quip(b, pick(TYPES[type].quips), 1);
-    if (type === 'mosquito' || type === 'fly' || type === 'bee') Sfx.buzz();
+  if (!b.baby) {
+    if (Math.random() < 0.22) quip(b, pick(TYPES[b.type].quips), 1);
+    if (b.type === 'mosquito' || b.type === 'fly' || b.type === 'bee') Sfx.buzz();
   }
   return b;
 }
+function spawnBug(type, opts) { return addBug(makeBug(type, opts)); }
+function lettersOnScreen() { let n = 0; for (const b of G.bugs) if (!b.dead) n += b.text.length - b.typed; return n; }
 function pickType() {
   let total = 0; const opts = [];
   for (const k of ORDER) { const T = TYPES[k]; if (UNLOCK[k] <= G.wave && T.weight > 0) { opts.push(k); total += T.weight; } }
@@ -927,7 +928,7 @@ function spawnSpray() {
 /* ---------------- flow ---------------- */
 function resetRun() {
   Object.assign(G, {
-    score: 0, combo: 0, maxCombo: 0, correct: 0, wrong: 0, bugsKilled: 0, wave: 0, snoozes: 3, playTime: 0, activeTime: 0, sprays: 0,
+    score: 0, combo: 0, maxCombo: 0, correct: 0, wrong: 0, bugsKilled: 0, wave: 0, snoozes: 3, playTime: 0, activeTime: 0, sprays: 0, wpmChars: 0, wpmTime: 0,
     bugs: [], spray: null, target: null, splats: [], freezeT: 0, doubleT: 0, nextSprayT: 0, pogoInvuln: 0, shake: 0,
     banner: null, seen: new Set(), submitted: false
   });
@@ -953,13 +954,21 @@ function beginIntro(n) {
   G.introDur = cards.length ? 1.6 + 1.25 * cards.length : 1.5;
   G.introT = G.introDur;
 }
+/* Difficulty. Each wave brings in letters at a set pace, measured like a typing test
+   (letters plus one space per word, per minute, divided by 5). Waves 1 to 3 climb quickly,
+   then every wave asks for 3 WPM more, up to 100. Long words therefore arrive further apart,
+   instead of bugs coming faster AND having longer words at the same time.
+   To make the whole game easier or harder, change the numbers in waveDemand. */
+function waveDemand(n) { return Math.min(100, n <= 3 ? 12 + 6 * (n - 1) : 24 + 3 * (n - 3)); }
+// The most untyped letters allowed on screen at once. New bugs wait until there's room.
+function letterBudget(n) { return Math.min(40, 6 + 3 * n); }
 function beginWave() {
   const n = G.wave, boss = n % 5 === 0;
   G.state = 'wave';
-  G.speedMul = Math.min(1 + 0.07 * (n - 1), 2.3);
-  G.toSpawn = boss ? Math.min(4 + n, 20) : Math.min(6 + 2 * n, 32);
-  G.interval = Math.max(0.5, 2.05 - 0.12 * n) * (boss ? 1.3 : 1);
-  G.cap = Math.min(4 + n, 14);
+  G.speedMul = Math.min(1 + 0.05 * (n - 1), 1.8);
+  G.toSpawn = boss ? Math.min(4 + n, 16) : Math.min(5 + 2 * n, 22);
+  G.rate = waveDemand(n) / 12 * (boss ? 0.8 : 1);      // letters per second
+  G.budget = letterBudget(n) + (boss ? 15 : 0);          // the boss's sentence gets extra room
   G.spawnTimer = 0.4;
   G.bossPending = boss;
   if (n >= 2 && G.nextSprayT <= 0) G.nextSprayT = rand(8, 15);
@@ -990,7 +999,7 @@ function gameOver() {
   $('pauseBtn').hidden = true;
   const acc = Math.round(100 * G.correct / Math.max(1, G.correct + G.wrong));
   $('oScore').textContent = fmt(G.score);
-  $('oWpm').textContent = `${wpmNow()} WPM`;
+  $('oWpm').textContent = wpmText();
   $('oAcc').textContent = `${acc}%`;
   $('oWave').textContent = `Wave ${G.wave}`;
   $('oBugs').textContent = fmt(G.bugsKilled);
@@ -1001,7 +1010,12 @@ function gameOver() {
   $('againBtn').focus({ preventScroll: true });
   submitRun();
 }
-function wpmNow() { return G.activeTime > 2 ? Math.round((G.correct / 5) / (G.activeTime / 60)) : 0; }
+/* Typing speed, measured like a typing test. For every finished word of 2+ letters we time
+   the keystrokes from its first letter to its last (any single gap over 1.5 s counts as 1.5 s),
+   then count the word's letters plus one space at that same pace. Time spent looking for the
+   next bug isn't counted, and one-letter bugs aren't used. 0 means "not measured yet". */
+function wpmNow() { return G.wpmTime >= 1.5 ? Math.round((G.wpmChars / 5) / (G.wpmTime / 60)) : 0; }
+function wpmText() { const w = wpmNow(); return w ? `${w} WPM` : '– WPM'; }
 function multNow() { return Math.min(4, 1 + 0.5 * Math.floor(G.combo / 15)); }
 
 /* ---------------- typing ---------------- */
@@ -1024,13 +1038,21 @@ function handleChar(raw) {
   if (tg.text[tg.typed] === ch) hit(tg); else miss(tg);
 }
 function hit(o) {
+  const now = performance.now();
+  if (o.typed === 0) o.span = 0;                                            // first letter of this word
+  else o.span += Math.min((now - o.lastKey) / 1000 * TIME_SCALE, 1.5);      // gap since the previous key
+  o.lastKey = now;
   o.typed++; G.correct++; G.combo++; G.maxCombo = Math.max(G.maxCombo, G.combo);
   const m = multNow() * (G.doubleT > 0 ? 2 : 1);
   G.score += 10 * m;
   o.flash = 0.12;
   Sfx.tick(G.combo);
   burst(o.x, o.y, '#fff', 3, 90 * S);
-  if (o.typed >= o.text.length) kill(o);
+  if (o.typed >= o.text.length) {
+    const n = o.text.length;
+    if (n >= 2 && o.span > 0) { G.wpmChars += n + 1; G.wpmTime += o.span / (n - 1) * (n + 1); }
+    kill(o);
+  }
 }
 function miss(o) {
   G.wrong++; G.combo = 0;
@@ -1125,9 +1147,18 @@ function update(dt) {
     G.pogoInvuln -= dt; G.doubleT = Math.max(0, G.doubleT - dt);
     const frozen = G.freezeT > 0; G.freezeT = Math.max(0, G.freezeT - dt);
     if (!frozen) {
-      if (G.bossPending) { G.bossPending = false; const s = spawnBug('snail'); quip(s, pick(TYPES.snail.quips), 1); }
+      if (G.bossPending) {
+        G.bossPending = false; const s = spawnBug('snail'); quip(s, pick(TYPES.snail.quips), 1);
+        G.spawnTimer = (s.text.length + 1) / G.rate * 0.5;
+      }
       G.spawnTimer -= dt;
-      if (G.toSpawn > 0 && G.spawnTimer <= 0 && aliveBugs().length < G.cap) { spawnBug(pickType()); G.toSpawn--; G.spawnTimer = G.interval * rand(0.75, 1.25); }
+      if (G.toSpawn > 0 && G.spawnTimer <= 0) {
+        const b = makeBug(pickType());
+        if (!aliveBugs().length || lettersOnScreen() + b.text.length <= G.budget) {
+          addBug(b); G.toSpawn--;
+          G.spawnTimer = (b.text.length + 1) / G.rate * rand(0.8, 1.2);   // longer word, longer gap
+        } else G.spawnTimer = 0.3;   // screen is full: wait for the player to clear some letters
+      }
       if (G.wave >= 2 && !G.spray) { G.nextSprayT -= dt; if (G.nextSprayT <= 0) { spawnSpray(); G.nextSprayT = rand(22, 34); } }
     }
     if (G.spray) {
@@ -1387,7 +1418,7 @@ function drawHUD() {
   const by = H - (compact ? 14 : 20) * s;
   ctx.textAlign = 'left'; ctx.font = font(600, (compact ? 14 : 16) * s); ctx.fillStyle = 'rgba(255,246,224,.85)';
   const acc = Math.round(100 * G.correct / Math.max(1, G.correct + G.wrong));
-  ctx.fillText(`${wpmNow()} WPM`, lx, by);
+  ctx.fillText(wpmText(), lx, by);
   if (G.correct + G.wrong > 0) ctx.fillText(`${acc}% accurate`, lx + (compact ? 80 : 100) * s, by);
   if (G.wave <= 2) {
     ctx.font = font(500, (compact ? 12 : 14) * s); ctx.fillStyle = 'rgba(255,246,224,.55)';
@@ -1723,7 +1754,7 @@ async function submitRun() {
   setSave('Saving your score…');
   const tok = G.runPromise ? await G.runPromise : null;
   if (!tok || !tok.ok) { setSave('This run couldn\'t be saved because the leaderboard didn\'t answer when it started. Play again to save the next one.'); return; }
-  const run = { id: G.player.id, token: tok.token, score: Math.round(G.score), correct: G.correct, wrong: G.wrong, bugs: G.bugsKilled, wave: G.wave, sprays: G.sprays, maxCombo: G.maxCombo, duration: Math.round(G.playTime * 10) / 10, active: Math.round(G.activeTime * 10) / 10 };
+  const run = { id: G.player.id, token: tok.token, score: Math.round(G.score), correct: G.correct, wrong: G.wrong, bugs: G.bugsKilled, wave: G.wave, sprays: G.sprays, maxCombo: G.maxCombo, duration: Math.round(G.playTime * 10) / 10, active: Math.round(G.activeTime * 10) / 10, wpmChars: G.wpmChars, wpmTime: Math.round(G.wpmTime * 100) / 100 };
   try {
     const j = await Api.call('submit', run);
     if (j && j.ok) {
