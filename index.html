@@ -959,13 +959,13 @@ function beginIntro(n) {
    then every wave asks for 3 WPM more, up to 100. Long words therefore arrive further apart,
    instead of bugs coming faster AND having longer words at the same time.
    To make the whole game easier or harder, change the numbers in waveDemand. */
-function waveDemand(n) { return Math.min(100, n <= 3 ? 12 + 6 * (n - 1) : 24 + 3 * (n - 3)); }
+function waveDemand(n) { return Math.min(100, n <= 3 ? 12 + 6 * (n - 1) : 26 + 4 * (n - 3)); }
 // The most untyped letters allowed on screen at once. New bugs wait until there's room.
 function letterBudget(n) { return Math.min(40, 6 + 3 * n); }
 function beginWave() {
   const n = G.wave, boss = n % 5 === 0;
   G.state = 'wave';
-  G.speedMul = Math.min(1 + 0.05 * (n - 1), 1.8);
+  G.speedMul = Math.min(1 + 0.06 * (n - 1), 1.8);
   G.toSpawn = boss ? Math.min(4 + n, 16) : Math.min(5 + 2 * n, 22);
   G.rate = waveDemand(n) / 12 * (boss ? 0.8 : 1);      // letters per second
   G.budget = letterBudget(n) + (boss ? 15 : 0);          // the boss's sentence gets extra room
